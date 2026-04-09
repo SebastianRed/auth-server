@@ -1,39 +1,42 @@
 package cl.sebastianrojo.authserver.domain.entity;
 
-import jakarta.persistence.*;
-import lombok.*;
+import jakarta.persistence.CascadeType;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.JoinTable;
+import jakarta.persistence.ManyToMany;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.Table;
 import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
 import java.time.Instant;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
- * Entidad principal del dominio. Implementa UserDetails de Spring Security
- * para integración directa con el framework de autenticación.
+ * Entidad principal del sistema de autenticación.
  *
- * Decisión de diseño: integrar UserDetails en la entidad evita una capa
- * de adaptador, pero exige que los campos de seguridad estén en el dominio.
- * Aceptable para un Auth Server donde User ES el sujeto de seguridad.
+ * <p>Implementa {@link UserDetails} para integración con Spring Security.
+ * Esto permite que el servicio de UserDetailsService retorne directamente
+ * la entidad sin necesidad de un adaptador intermedio.</p>
+ *
+ * <p>Los roles se cargan con EAGER por requerimiento de Spring Security
+ * (necesita los authorities en el momento de autenticación). Se usa
+ * {@code FetchType.EAGER} solo aquí donde está justificado técnicamente.</p>
  */
 @Entity
 @Table(name = "users")
-@Getter
-@Setter
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-@EqualsAndHashCode(of = "id", callSuper = false)
-@ToString(exclude = {"passwordHash", "roles", "refreshTokens", "verificationTokens"})
 public class User extends BaseEntity implements UserDetails {
-
-    @Column(name = "username", nullable = false, unique = true, length = 50)
-    private String username;
 
     @Column(name = "email", nullable = false, unique = true, length = 255)
     private String email;
+
+    @Column(name = "username", nullable = false, unique = true, length = 100)
+    private String username;
 
     @Column(name = "password_hash", nullable = false, length = 255)
     private String passwordHash;
@@ -45,92 +48,190 @@ public class User extends BaseEntity implements UserDetails {
     private String lastName;
 
     @Column(name = "enabled", nullable = false)
-    @Builder.Default
-    private boolean enabled = true;
-
-    @Column(name = "email_verified", nullable = false)
-    @Builder.Default
-    private boolean emailVerified = false;
+    private boolean enabled = false;
 
     @Column(name = "account_locked", nullable = false)
-    @Builder.Default
     private boolean accountLocked = false;
 
-    @Column(name = "failed_attempts", nullable = false)
-    @Builder.Default
-    private int failedAttempts = 0;
+    @Column(name = "account_expired", nullable = false)
+    private boolean accountExpired = false;
+
+    @Column(name = "credentials_expired", nullable = false)
+    private boolean credentialsExpired = false;
+
+    @Column(name = "email_verified", nullable = false)
+    private boolean emailVerified = false;
+
+    @Column(name = "last_login_at")
+    private Instant lastLoginAt;
+
+    @Column(name = "failed_login_attempts", nullable = false)
+    private int failedLoginAttempts = 0;
 
     @Column(name = "locked_until")
     private Instant lockedUntil;
 
-    @Column(name = "client_id", length = 100)
-    private String clientId;
+    // ── Relaciones ──────────────────────────────────────────────────
 
-    // ===== Relaciones =====
-
+    /**
+     * EAGER justificado: Spring Security necesita los roles durante
+     * la autenticación, que ocurre en el mismo contexto de transacción.
+     */
     @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(
         name = "user_roles",
         joinColumns = @JoinColumn(name = "user_id"),
         inverseJoinColumns = @JoinColumn(name = "role_id")
     )
-    @Builder.Default
     private Set<Role> roles = new HashSet<>();
 
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
-    @Builder.Default
-    private List<RefreshToken> refreshTokens = new ArrayList<>();
+    private Set<RefreshToken> refreshTokens = new HashSet<>();
 
     @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
-    @Builder.Default
-    private List<VerificationToken> verificationTokens = new ArrayList<>();
+    private Set<VerificationToken> verificationTokens = new HashSet<>();
 
-    // ===== UserDetails implementation =====
+    // ── Constructors ─────────────────────────────────────────────────
+
+    protected User() {
+        // Requerido por JPA
+    }
+
+    /**
+     * Constructor de creación. El builder estático es la forma preferida
+     * de instanciar un User desde el código de servicio.
+     */
+    private User(Builder builder) {
+        this.email = builder.email;
+        this.username = builder.username;
+        this.passwordHash = builder.passwordHash;
+        this.firstName = builder.firstName;
+        this.lastName = builder.lastName;
+        this.enabled = builder.enabled;
+        this.roles = builder.roles;
+    }
+
+    // ── UserDetails (Spring Security) ─────────────────────────────
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return roles.stream()
-            .flatMap(role -> {
-                // Incluye tanto el rol como sus permisos individuales
-                Set<GrantedAuthority> authorities = new HashSet<>();
-                authorities.add(new SimpleGrantedAuthority(role.getName()));
-                role.getPermissions().stream()
-                    .map(p -> new SimpleGrantedAuthority(p.getName()))
-                    .forEach(authorities::add);
-                return authorities.stream();
-            })
-            .collect(Collectors.toSet());
+        return roles;
     }
 
+    /**
+     * Retorna el hash de la contraseña (nunca la contraseña en texto plano).
+     */
     @Override
     public String getPassword() {
         return passwordHash;
     }
 
+    /**
+     * Username usado por Spring Security. Usamos el email como identificador
+     * primario de autenticación (más único que username).
+     */
+    @Override
+    public String getUsername() {
+        return email;
+    }
+
     @Override
     public boolean isAccountNonExpired() {
-        return true;
+        return !accountExpired;
     }
 
     @Override
     public boolean isAccountNonLocked() {
-        if (!accountLocked) return true;
-        // Desbloqueo automático si expiró el tiempo de bloqueo
-        if (lockedUntil != null && Instant.now().isAfter(lockedUntil)) {
-            this.accountLocked = false;
-            this.failedAttempts = 0;
-            this.lockedUntil = null;
-            return true;
-        }
-        return false;
+        // Verificar también el tiempo de bloqueo temporal
+        if (accountLocked) return false;
+        if (lockedUntil != null && Instant.now().isBefore(lockedUntil)) return false;
+        return true;
     }
 
     @Override
     public boolean isCredentialsNonExpired() {
-        return true;
+        return !credentialsExpired;
     }
 
-    // ===== Métodos de dominio =====
+    @Override
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    // ── Métodos de dominio ────────────────────────────────────────
+
+    /**
+     * Incrementa el contador de intentos fallidos y bloquea
+     * temporalmente si supera el máximo.
+     */
+    public void registerFailedLoginAttempt(int maxAttempts, long lockDurationSeconds) {
+        this.failedLoginAttempts++;
+        if (this.failedLoginAttempts >= maxAttempts) {
+            this.lockedUntil = Instant.now().plusSeconds(lockDurationSeconds);
+        }
+    }
+
+    /**
+     * Resetea el contador de intentos fallidos tras un login exitoso.
+     */
+    public void resetFailedLoginAttempts() {
+        this.failedLoginAttempts = 0;
+        this.lockedUntil = null;
+    }
+
+    public void addRole(Role role) {
+        this.roles.add(role);
+    }
+
+    public void removeRole(Role role) {
+        this.roles.remove(role);
+    }
+
+    public boolean hasRole(String roleName) {
+        return roles.stream().anyMatch(r -> r.getName().equals(roleName));
+    }
+
+    // ── Getters / Setters ────────────────────────────────────────────
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public String getDisplayUsername() {
+        return username;
+    }
+
+    public String getPasswordHash() {
+        return passwordHash;
+    }
+
+    public void setPasswordHash(String passwordHash) {
+        this.passwordHash = passwordHash;
+    }
+
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
+    }
+
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
+    }
 
     public String getFullName() {
         if (firstName == null && lastName == null) return username;
@@ -139,26 +240,109 @@ public class User extends BaseEntity implements UserDetails {
         return firstName + " " + lastName;
     }
 
-    public void incrementFailedAttempts() {
-        this.failedAttempts++;
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
     }
 
-    public void resetFailedAttempts() {
-        this.failedAttempts = 0;
-        this.accountLocked = false;
-        this.lockedUntil = null;
+    public boolean isAccountLocked() {
+        return accountLocked;
     }
 
-    public void lockAccount(long lockDurationMinutes) {
-        this.accountLocked = true;
-        this.lockedUntil = Instant.now().plusSeconds(lockDurationMinutes * 60);
+    public void setAccountLocked(boolean accountLocked) {
+        this.accountLocked = accountLocked;
     }
 
-    public void addRole(Role role) {
-        this.roles.add(role);
+    public boolean isEmailVerified() {
+        return emailVerified;
     }
 
-    public boolean hasRole(String roleName) {
-        return roles.stream().anyMatch(r -> r.getName().equals(roleName));
+    public void setEmailVerified(boolean emailVerified) {
+        this.emailVerified = emailVerified;
+    }
+
+    public Instant getLastLoginAt() {
+        return lastLoginAt;
+    }
+
+    public void setLastLoginAt(Instant lastLoginAt) {
+        this.lastLoginAt = lastLoginAt;
+    }
+
+    public int getFailedLoginAttempts() {
+        return failedLoginAttempts;
+    }
+
+    public Instant getLockedUntil() {
+        return lockedUntil;
+    }
+
+    public Set<Role> getRoles() {
+        return roles;
+    }
+
+    public Set<RefreshToken> getRefreshTokens() {
+        return refreshTokens;
+    }
+
+    // ── Builder ───────────────────────────────────────────────────────
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static final class Builder {
+        private String email;
+        private String username;
+        private String passwordHash;
+        private String firstName;
+        private String lastName;
+        private boolean enabled = false;
+        private Set<Role> roles = new HashSet<>();
+
+        private Builder() {}
+
+        public Builder email(String email) {
+            this.email = email;
+            return this;
+        }
+
+        public Builder username(String username) {
+            this.username = username;
+            return this;
+        }
+
+        public Builder passwordHash(String passwordHash) {
+            this.passwordHash = passwordHash;
+            return this;
+        }
+
+        public Builder firstName(String firstName) {
+            this.firstName = firstName;
+            return this;
+        }
+
+        public Builder lastName(String lastName) {
+            this.lastName = lastName;
+            return this;
+        }
+
+        public Builder enabled(boolean enabled) {
+            this.enabled = enabled;
+            return this;
+        }
+
+        public Builder roles(Set<Role> roles) {
+            this.roles = roles;
+            return this;
+        }
+
+        public User build() {
+            return new User(this);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "User{id=" + getId() + ", email='" + email + "', username='" + username + "'}";
     }
 }
