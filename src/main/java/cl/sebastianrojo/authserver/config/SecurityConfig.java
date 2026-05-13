@@ -1,11 +1,7 @@
 package cl.sebastianrojo.authserver.config;
 
-import cl.sebastianrojo.authserver.config.properties.AuthProperties;
-import cl.sebastianrojo.authserver.security.handler.CustomAccessDeniedHandler;
-import cl.sebastianrojo.authserver.security.handler.JwtAuthenticationEntryPoint;
-import cl.sebastianrojo.authserver.security.jwt.JwtAuthenticationFilter;
-import cl.sebastianrojo.authserver.security.ratelimit.RateLimitFilter;
-import cl.sebastianrojo.authserver.security.service.UserDetailsServiceImpl;
+import java.util.List;
+
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -26,7 +22,12 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.List;
+import cl.sebastianrojo.authserver.config.properties.AuthProperties;
+import cl.sebastianrojo.authserver.security.handler.CustomAccessDeniedHandler;
+import cl.sebastianrojo.authserver.security.handler.JwtAuthenticationEntryPoint;
+import cl.sebastianrojo.authserver.security.jwt.JwtAuthenticationFilter;
+import cl.sebastianrojo.authserver.security.ratelimit.RateLimitFilter;
+import cl.sebastianrojo.authserver.security.service.UserDetailsServiceImpl;
 
 /**
  * Configuración central de Spring Security.
@@ -180,8 +181,7 @@ public class SecurityConfig {
 
     @Bean
     public AuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
-        provider.setUserDetailsService(userDetailsService);
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(userDetailsService);
         provider.setPasswordEncoder(passwordEncoder());
         provider.setHideUserNotFoundExceptions(true);
         return provider;
